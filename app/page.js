@@ -8,11 +8,12 @@ import {
 import { getAuth, signInAnonymously, onAuthStateChanged } from 'firebase/auth';
 import { 
   Play, Users, Crown, Copy, CheckCircle2, Link as LinkIcon, 
-  Smile, Zap, Trophy, Timer, ArrowRight, RefreshCw, AlertCircle, Merge
+  Smile, Zap, Trophy, Timer, ArrowRight, RefreshCw, AlertCircle, 
+  Merge, Undo2, ChevronLeft, MousePointerClick, X
 } from 'lucide-react';
 
 // ==================================================================
-// [완료] 기존에 사용하시던 Firebase 설정값을 적용했습니다.
+// [완료] 기존 Firebase 설정값 유지
 // ==================================================================
 const firebaseConfig = {
   apiKey: "AIzaSyBPd5xk9UseJf79GTZogckQmKKwwogneco",
@@ -38,7 +39,6 @@ try {
   db = getFirestore(firebaseApp);
   auth = getAuth(firebaseApp);
 } catch (e) { 
-  console.error("Firebase Init Error:", e);
   initError = e.message;
 }
 
@@ -66,8 +66,8 @@ export default function NeodoNadoGame() {
   const [error, setError] = useState(initError);
   const [copyStatus, setCopyStatus] = useState(null);
   
-  // 검토 단계용 상태
-  const [selectedWords, setSelectedWords] = useState([]); 
+  // 검토 단계용 상태 (로컬)
+  const [selectedWords, setSelectedWords] = useState([]); // 병합 대기열 IDs
 
   const isJoined = user && players.some(p => p.id === user.uid);
   const isHost = roomData?.hostId === user?.uid;
@@ -79,12 +79,7 @@ export default function NeodoNadoGame() {
       const code = p.get('room');
       if (code && code.length === 4) setRoomCode(code.toUpperCase());
     }
-    
-    if(!auth) {
-      if(!initError) setError("Firebase 인증 객체가 없습니다. 설정을 확인하세요.");
-      return;
-    }
-
+    if(!auth) return;
     const unsub = onAuthStateChanged(auth, u => {
       if(u) setUser(u);
       else signInAnonymously(auth).catch(e => setError("로그인 실패: "+e.message));
@@ -113,13 +108,12 @@ export default function NeodoNadoGame() {
     return () => { unsubRoom(); unsubPlayers(); };
   }, [user, roomCode]);
 
-  // --- Timer & Auto Transition ---
+  // --- Timer ---
   useEffect(() => {
     if (roomData?.status === 'playing' && timeLeft > 0) {
       const timer = setInterval(() => setTimeLeft(p => Math.max(0, p - 1)), 1000);
       return () => clearInterval(timer);
     }
-    // 시간 종료 시 '검토(Review)' 단계로 이동
     if (roomData?.status === 'playing' && timeLeft === 0 && isHost) {
       startReviewPhase();
     }
@@ -152,7 +146,7 @@ export default function NeodoNadoGame() {
     const code = Math.random().toString(36).substring(2,6).toUpperCase();
     await setDoc(doc(db,'rooms',code), {
       hostId: user.uid, status: 'lobby', round: 0,
-      topic: '', endTime: 0, reviewData: [], 
+      topic: '', endTime: 0, reviewData: [], mergedGroups: [], // mergedGroups: 실행취소용 히스토리
       createdAt: Date.now()
     });
     await setDoc(doc(db,'rooms',code,'players',user.uid), { name: playerName, score: 0, joinedAt: Date.now(), lastActive: Date.now() });
@@ -178,7 +172,7 @@ export default function NeodoNadoGame() {
     await updateDoc(doc(db,'rooms',roomCode), {
       status: 'playing', topic, endTime, 
       round: (roomData.round || 0) + 1,
-      reviewData: []
+      reviewData: [], mergedGroups: []
     });
     setMyAnswers(['','','','','']);
   };
@@ -191,7 +185,7 @@ export default function NeodoNadoGame() {
     });
   };
 
-  // --- Review Phase Logic ---
+  // --- [IMPROVED] Review Logic ---
   const startReviewPhase = async () => {
     if(!isHost) return;
 
@@ -202,8 +196,9 @@ export default function NeodoNadoGame() {
           rawWords.push({ 
             id: Math.random().toString(36).substr(2,9),
             word: word.trim(), 
+            originalWord: word.trim(), // 복구용 원본 데이터
             owner: p.name, 
-            mergedTo: null 
+            mergedGroupId: null // 병합된 그룹 ID (null이면 병합 안됨)
           });
         });
       }
@@ -211,10 +206,12 @@ export default function NeodoNadoGame() {
 
     await updateDoc(doc(db,'rooms',roomCode), {
       status: 'review',
-      reviewData: rawWords
+      reviewData: rawWords,
+      mergedGroups: []
     });
   };
 
+  // 단어 선택/해제 (로컬 상태)
   const toggleSelectWord = (wordId) => {
     if(!isHost) return;
     vibrate();
@@ -225,27 +222,65 @@ export default function NeodoNadoGame() {
     }
   };
 
+  // 병합 실행
   const mergeWords = async () => {
     if(!isHost || selectedWords.length < 2) return;
     vibrate();
 
+    // 첫 번째 선택된 단어를 대표 단어로 설정
     const targetId = selectedWords[0];
-    const targetWord = roomData.reviewData.find(w => w.id === targetId).word;
+    const targetWordObj = roomData.reviewData.find(w => w.id === targetId);
+    const targetWord = targetWordObj.word;
+    const groupId = Math.random().toString(36).substr(2,9); // 그룹 ID 생성
 
+    // DB 업데이트
     const newReviewData = roomData.reviewData.map(item => {
       if(selectedWords.includes(item.id)) {
-        return { ...item, word: targetWord };
+        return { ...item, word: targetWord, mergedGroupId: groupId };
       }
       return item;
     });
 
-    await updateDoc(doc(db,'rooms',roomCode), { reviewData: newReviewData });
+    // 히스토리에 추가 (실행 취소용)
+    const newGroupInfo = { id: groupId, word: targetWord, count: selectedWords.length };
+    const newMergedGroups = [...(roomData.mergedGroups || []), newGroupInfo];
+
+    await updateDoc(doc(db,'rooms',roomCode), { 
+      reviewData: newReviewData,
+      mergedGroups: newMergedGroups
+    });
     setSelectedWords([]);
   };
 
-  // --- Scoring Logic ---
+  // 병합 취소 (Undo)
+  const undoMerge = async (groupId) => {
+    if(!isHost) return;
+    if(!window.confirm("이 병합을 취소하시겠습니까?")) return;
+    vibrate();
+
+    // 해당 그룹 ID를 가진 단어들을 원상복구
+    const newReviewData = roomData.reviewData.map(item => {
+      if(item.mergedGroupId === groupId) {
+        return { ...item, word: item.originalWord, mergedGroupId: null };
+      }
+      return item;
+    });
+
+    const newMergedGroups = roomData.mergedGroups.filter(g => g.id !== groupId);
+
+    await updateDoc(doc(db,'rooms',roomCode), { 
+      reviewData: newReviewData,
+      mergedGroups: newMergedGroups
+    });
+  };
+
+  // 결과 집계 (최종 컨펌)
   const calculateScores = async () => {
     if(!isHost) return;
+    
+    // 안전장치: 병합되지 않은 단어가 많은데 넘어가는지 체크? (선택사항)
+    if(!window.confirm("검토를 마치고 점수를 집계하시겠습니까?")) return;
+    
     vibrate();
     
     const frequency = {};
@@ -257,7 +292,6 @@ export default function NeodoNadoGame() {
     const updates = players.map(p => {
       let roundScore = 0;
       const scoredWords = [];
-
       const myItems = roomData.reviewData.filter(item => item.owner === p.name);
       
       myItems.forEach(item => {
@@ -281,6 +315,13 @@ export default function NeodoNadoGame() {
     await updateDoc(doc(db,'rooms',roomCode), { status: 'result', frequency });
   };
 
+  // 결과 화면에서 다시 검토 화면으로 복귀 (실수 방지)
+  const backToReview = async () => {
+    if(!isHost) return;
+    if(!window.confirm("점수 집계를 취소하고 다시 검토하시겠습니까?")) return;
+    await updateDoc(doc(db,'rooms',roomCode), { status: 'review' });
+  };
+
   const copyInviteLink = () => {
     if (typeof window === 'undefined') return;
     const url = `${window.location.origin.split('?')[0]}?room=${roomCode}`;
@@ -301,19 +342,28 @@ export default function NeodoNadoGame() {
     setMyAnswers(newArr);
   };
 
-  const myPlayer = players.find(p => p.id === user?.uid);
-  const isSubmitted = myPlayer?.currentAnswers;
-
   // --- RENDER ---
-  if (error) return (
-    <div className="flex h-screen flex-col items-center justify-center bg-yellow-50 text-red-500 font-bold p-6 text-center">
-      <AlertCircle size={40} className="mb-4"/>
-      <p>{error}</p>
-      <button onClick={()=>window.location.reload()} className="mt-4 bg-slate-200 px-4 py-2 rounded text-black">새로고침</button>
-    </div>
-  );
-
   if(!user) return <div className="h-screen flex items-center justify-center bg-yellow-50 font-bold text-yellow-600">Loading...</div>;
+
+  // 검토 단계 데이터 필터링
+  const getReviewItems = () => {
+    if (!roomData?.reviewData) return {};
+    // 아직 병합되지 않은 단어들만 참가자별로 그룹화
+    const activeItems = roomData.reviewData.filter(item => !item.mergedGroupId && !selectedWords.includes(item.id));
+    
+    // owner별로 그룹핑
+    const grouped = {};
+    activeItems.forEach(item => {
+      if (!grouped[item.owner]) grouped[item.owner] = [];
+      grouped[item.owner].push(item);
+    });
+    return grouped;
+  };
+
+  const getStagingItems = () => {
+    if (!roomData?.reviewData) return [];
+    return roomData.reviewData.filter(item => selectedWords.includes(item.id));
+  };
 
   return (
     <div className="min-h-screen bg-yellow-50 text-slate-800 font-sans relative overflow-x-hidden selection:bg-yellow-200">
@@ -337,28 +387,11 @@ export default function NeodoNadoGame() {
               <h2 className="text-3xl font-black text-slate-800 mb-1">공감 게임</h2>
               <p className="text-slate-400 text-sm font-bold">텔레파시가 통하는 친구는?</p>
             </div>
-            
-            <input 
-              value={playerName} onChange={e=>setPlayerName(e.target.value)} 
-              placeholder="닉네임" 
-              className="w-full bg-slate-50 border-2 border-slate-200 rounded-xl px-5 py-4 text-lg font-bold outline-none focus:border-yellow-400 transition-all"
-            />
-            
-            {!roomCode && (
-              <button onClick={handleCreate} className="w-full bg-yellow-400 hover:bg-yellow-500 text-white py-4 rounded-xl font-black text-xl shadow-[4px_4px_0px_rgba(0,0,0,0.1)] active:translate-y-[2px] active:shadow-[2px_2px_0px_rgba(0,0,0,0.1)] transition-all">
-                방 만들기
-              </button>
-            )}
-
+            <input value={playerName} onChange={e=>setPlayerName(e.target.value)} placeholder="닉네임" className="w-full bg-slate-50 border-2 border-slate-200 rounded-xl px-5 py-4 text-lg font-bold outline-none focus:border-yellow-400 transition-all"/>
+            {!roomCode && <button onClick={handleCreate} className="w-full bg-yellow-400 hover:bg-yellow-500 text-white py-4 rounded-xl font-black text-xl shadow-[4px_4px_0px_rgba(0,0,0,0.1)] active:translate-y-[2px] active:shadow-[2px_2px_0px_rgba(0,0,0,0.1)] transition-all">방 만들기</button>}
             <div className="flex gap-3">
-              <input 
-                value={roomCode} onChange={e=>setRoomCode(e.target.value.toUpperCase())} 
-                placeholder="코드" maxLength={4}
-                className="flex-1 bg-slate-50 border-2 border-slate-200 rounded-xl text-center font-mono font-black text-xl outline-none focus:border-yellow-400"
-              />
-              <button onClick={handleJoin} className="flex-[1.5] bg-slate-800 hover:bg-slate-700 text-white py-4 rounded-xl font-bold shadow-[4px_4px_0px_rgba(0,0,0,0.2)] active:translate-y-[2px] active:shadow-[2px_2px_0px_rgba(0,0,0,0.2)] transition-all">
-                입장
-              </button>
+              <input value={roomCode} onChange={e=>setRoomCode(e.target.value.toUpperCase())} placeholder="코드" maxLength={4} className="flex-1 bg-slate-50 border-2 border-slate-200 rounded-xl text-center font-mono font-black text-xl outline-none focus:border-yellow-400"/>
+              <button onClick={handleJoin} className="flex-[1.5] bg-slate-800 hover:bg-slate-700 text-white py-4 rounded-xl font-bold shadow-[4px_4px_0px_rgba(0,0,0,0.2)] active:translate-y-[2px] active:shadow-[2px_2px_0px_rgba(0,0,0,0.2)] transition-all">입장</button>
             </div>
           </div>
         </div>
@@ -368,155 +401,149 @@ export default function NeodoNadoGame() {
       {isJoined && roomData?.status === 'lobby' && (
         <div className="p-6 max-w-md mx-auto space-y-6 animate-in slide-in-from-bottom-4">
           <div className="bg-white p-6 rounded-[2rem] border-4 border-blue-100 shadow-xl flex justify-between items-center">
-            <div>
-              <p className="text-blue-400 text-xs font-black uppercase tracking-widest">Players</p>
-              <h2 className="text-4xl font-black text-slate-800">{players.length} <span className="text-xl text-slate-300">/ 20</span></h2>
-            </div>
+            <div><p className="text-blue-400 text-xs font-black uppercase tracking-widest">Players</p><h2 className="text-4xl font-black text-slate-800">{players.length} <span className="text-xl text-slate-300">/ 20</span></h2></div>
             <Users size={40} className="text-blue-200"/>
           </div>
-
           <div className="bg-white border-2 border-slate-100 rounded-[2rem] p-4 min-h-[300px] flex flex-col shadow-sm">
             <div className="flex justify-between items-center mb-4 px-2">
               <span className="text-xs font-black text-slate-400 uppercase">대기 명단</span>
-              <button onClick={copyInviteLink} className="text-[10px] font-bold text-white bg-slate-800 px-3 py-1.5 rounded-full flex gap-1 hover:bg-slate-700 transition-colors">
-                {copyStatus==='link'?<CheckCircle2 size={12}/>:<LinkIcon size={12}/>} 초대 링크
-              </button>
+              <button onClick={copyInviteLink} className="text-[10px] font-bold text-white bg-slate-800 px-3 py-1.5 rounded-full flex gap-1 hover:bg-slate-700 transition-colors">{copyStatus==='link'?<CheckCircle2 size={12}/>:<LinkIcon size={12}/>} 초대 링크</button>
             </div>
             <div className="flex-1 overflow-y-auto space-y-2 pr-1 custom-scrollbar">
               {players.map(p => (
                 <div key={p.id} className="flex items-center justify-between p-3 bg-slate-50 rounded-xl border border-slate-100">
-                  <div className="flex items-center gap-2">
-                    <div className={`w-3 h-3 rounded-full ${p.id===user.uid?'bg-blue-500':'bg-slate-300'}`}></div>
-                    <span className={`font-bold ${p.id===user.uid ? 'text-blue-600' : 'text-slate-600'}`}>{p.name}</span>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs font-bold text-slate-400">{p.score}점</span>
-                    {p.id===roomData.hostId && <Crown size={16} className="text-yellow-500" />}
-                  </div>
+                  <div className="flex items-center gap-2"><div className={`w-3 h-3 rounded-full ${p.id===user.uid?'bg-blue-500':'bg-slate-300'}`}></div><span className={`font-bold ${p.id===user.uid ? 'text-blue-600' : 'text-slate-600'}`}>{p.name}</span></div>
+                  <div className="flex items-center gap-2"><span className="text-xs font-bold text-slate-400">{p.score}점</span>{p.id===roomData.hostId && <Crown size={16} className="text-yellow-500" />}</div>
                 </div>
               ))}
             </div>
           </div>
-
-          {isHost ? (
-            <button onClick={handleStartRound} className="w-full bg-blue-500 hover:bg-blue-600 text-white p-5 rounded-2xl font-black text-xl shadow-[0_8px_20px_rgba(59,130,246,0.3)] flex items-center justify-center gap-2 active:scale-95 transition-all">
-              <Play size={24} fill="currentColor"/> 게임 시작
-            </button>
-          ) : (
-            <div className="text-center text-slate-400 font-bold animate-pulse py-4">방장이 곧 시작합니다...</div>
-          )}
+          {isHost ? <button onClick={handleStartRound} className="w-full bg-blue-500 hover:bg-blue-600 text-white p-5 rounded-2xl font-black text-xl shadow-[0_8px_20px_rgba(59,130,246,0.3)] flex items-center justify-center gap-2 active:scale-95 transition-all"><Play size={24} fill="currentColor"/> 게임 시작</button> : <div className="text-center text-slate-400 font-bold animate-pulse py-4">방장이 곧 시작합니다...</div>}
         </div>
       )}
 
       {/* 3. Input Phase */}
       {isJoined && roomData?.status === 'playing' && (
         <div className="flex flex-col h-[calc(100vh-80px)] p-4 max-w-lg mx-auto pb-20">
-          
-          {/* Topic Card */}
           <div className="bg-white border-2 border-yellow-400 p-6 rounded-3xl shadow-[4px_4px_0px_#facc15] text-center mb-6 relative overflow-hidden">
-            <div className="absolute top-0 left-0 w-full h-1 bg-slate-100">
-              <div className="h-full bg-yellow-400 transition-all duration-1000" style={{width: `${(timeLeft/ROUND_TIME)*100}%`}}></div>
-            </div>
+            <div className="absolute top-0 left-0 w-full h-1 bg-slate-100"><div className="h-full bg-yellow-400 transition-all duration-1000" style={{width: `${(timeLeft/ROUND_TIME)*100}%`}}></div></div>
             <p className="text-yellow-500 text-xs font-black uppercase tracking-widest mb-1">주제어</p>
             <h2 className="text-3xl font-black text-slate-800 break-keep leading-tight">{roomData.topic}</h2>
-            <div className="absolute top-4 right-4 flex items-center gap-1 text-slate-400 font-mono font-bold">
-              <Timer size={16}/> {timeLeft}
-            </div>
+            <div className="absolute top-4 right-4 flex items-center gap-1 text-slate-400 font-mono font-bold"><Timer size={16}/> {timeLeft}</div>
           </div>
-
           {!isSubmitted ? (
             <div className="flex-1 space-y-3 overflow-y-auto pb-4">
               <p className="text-center text-slate-400 text-xs font-bold mb-2">떠오르는 단어 5개를 적으세요!</p>
               {myAnswers.map((ans, idx) => (
                 <div key={idx} className="flex items-center gap-3">
                   <span className="w-6 text-center font-black text-slate-300">{idx+1}</span>
-                  <input 
-                    value={ans} 
-                    onChange={e => handleInputChange(idx, e.target.value)}
-                    className="flex-1 bg-white border-2 border-slate-200 focus:border-blue-400 rounded-xl px-4 py-3 font-bold text-slate-700 outline-none transition-all shadow-sm"
-                    placeholder="..."
-                  />
+                  <input value={ans} onChange={e => handleInputChange(idx, e.target.value)} className="flex-1 bg-white border-2 border-slate-200 focus:border-blue-400 rounded-xl px-4 py-3 font-bold text-slate-700 outline-none transition-all shadow-sm" placeholder="..."/>
                 </div>
               ))}
             </div>
           ) : (
             <div className="flex-1 flex flex-col items-center justify-center space-y-4">
-              <div className="w-20 h-20 bg-green-100 rounded-full flex items-center justify-center text-green-500 animate-bounce">
-                <CheckCircle2 size={40} />
-              </div>
+              <div className="w-20 h-20 bg-green-100 rounded-full flex items-center justify-center text-green-500 animate-bounce"><CheckCircle2 size={40} /></div>
               <h3 className="text-xl font-black text-slate-700">제출 완료!</h3>
               <p className="text-slate-400 text-sm font-bold">다른 친구들을 기다리고 있어요...</p>
             </div>
           )}
-
-          {!isSubmitted && (
-            <button 
-              onClick={submitAnswers}
-              className="mt-4 w-full bg-slate-800 text-white py-4 rounded-2xl font-black text-lg shadow-lg active:scale-95 transition-all"
-            >
-              제출하기
-            </button>
-          )}
-          {isHost && timeLeft > 0 && (
-            <button onClick={startReviewPhase} className="mt-2 text-xs text-slate-400 font-bold underline">
-              기다리기 지루한가요? 검토 시작
-            </button>
-          )}
+          {!isSubmitted && <button onClick={submitAnswers} className="mt-4 w-full bg-slate-800 text-white py-4 rounded-2xl font-black text-lg shadow-lg active:scale-95 transition-all">제출하기</button>}
+          {isHost && timeLeft > 0 && <button onClick={startReviewPhase} className="mt-2 text-xs text-slate-400 font-bold underline">기다리기 지루한가요? 검토 시작</button>}
         </div>
       )}
 
-      {/* 4. Review Phase (우기기 타임) */}
+      {/* 4. Review Phase (UI 개선됨) */}
       {isJoined && roomData?.status === 'review' && (
-        <div className="flex flex-col h-[calc(100vh-80px)] p-4 max-w-lg mx-auto pb-20">
+        <div className="flex flex-col h-[calc(100vh-80px)] p-4 max-w-lg mx-auto relative">
           <div className="text-center mb-4">
-            <h3 className="text-xl font-black text-slate-800">정답 검토 & 합치기</h3>
-            <p className="text-xs text-slate-400 font-bold">비슷한 단어를 선택해서 하나로 합치세요! (방장 전용)</p>
+            <h3 className="text-xl font-black text-slate-800">정답 검토</h3>
+            <p className="text-xs text-slate-400 font-bold">비슷한 단어를 눌러서 합쳐주세요!</p>
           </div>
 
-          <div className="flex-1 overflow-y-auto bg-white border-2 border-slate-100 rounded-[2rem] p-4 shadow-sm">
-            <div className="flex flex-wrap gap-2">
-              {roomData.reviewData.map((item) => {
-                const isSelected = selectedWords.includes(item.id);
-                return (
-                  <button
-                    key={item.id}
-                    onClick={() => toggleSelectWord(item.id)}
-                    disabled={!isHost}
-                    className={`px-3 py-2 rounded-xl font-bold border-2 transition-all text-sm flex items-center gap-1
-                      ${isSelected 
-                        ? 'bg-blue-600 border-blue-600 text-white shadow-lg scale-105' 
-                        : 'bg-slate-50 border-slate-200 text-slate-700 hover:border-blue-300'}
-                    `}
+          {/* User Cards Grid */}
+          <div className="flex-1 overflow-y-auto space-y-4 pb-48 custom-scrollbar">
+            {Object.entries(getReviewItems()).map(([owner, items]) => (
+              <div key={owner} className="bg-white border-2 border-slate-100 rounded-2xl p-3 shadow-sm">
+                <p className="text-xs font-black text-slate-400 mb-2 px-1">{owner}</p>
+                <div className="flex flex-wrap gap-2">
+                  {items.map(item => (
+                    <button 
+                      key={item.id} 
+                      onClick={() => toggleSelectWord(item.id)}
+                      disabled={!isHost}
+                      className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-sm font-bold text-slate-700 hover:bg-blue-50 hover:border-blue-300 transition-colors"
+                    >
+                      {item.word}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ))}
+            
+            {/* Merged History (Undo) */}
+            {roomData.mergedGroups?.length > 0 && (
+              <div className="bg-blue-50 border-2 border-blue-100 rounded-2xl p-4 mt-6">
+                <p className="text-xs font-black text-blue-400 mb-2 flex items-center gap-1"><Merge size={12}/> 합쳐진 단어들 (누르면 취소)</p>
+                <div className="flex flex-wrap gap-2">
+                  {roomData.mergedGroups.map(group => (
+                    <button 
+                      key={group.id} 
+                      onClick={() => undoMerge(group.id)}
+                      disabled={!isHost}
+                      className="px-3 py-1 bg-white border border-blue-200 rounded-lg text-xs font-bold text-blue-600 flex items-center gap-1 hover:bg-red-50 hover:text-red-500 hover:border-red-200 transition-all"
+                    >
+                      {group.word} <span className="bg-blue-100 text-blue-600 px-1.5 rounded-full">{group.count}</span> <X size={10}/>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Staging Area (Bottom Fixed) */}
+          <div className="fixed bottom-0 left-0 w-full bg-white border-t-2 border-slate-100 p-4 rounded-t-3xl shadow-[0_-10px_40px_rgba(0,0,0,0.1)] z-10">
+            <div className="max-w-lg mx-auto">
+              
+              {/* Selected Words */}
+              {selectedWords.length > 0 ? (
+                <div className="mb-4">
+                  <p className="text-xs font-bold text-slate-400 mb-2 ml-1">합칠 단어 ({selectedWords.length})</p>
+                  <div className="flex gap-2 overflow-x-auto pb-2 scrollbar-hide">
+                    {getStagingItems().map(item => (
+                      <button key={item.id} onClick={() => toggleSelectWord(item.id)} className="shrink-0 px-3 py-2 bg-blue-600 text-white rounded-xl text-sm font-bold shadow-md flex items-center gap-1">
+                        {item.word} <X size={12} className="opacity-50"/>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ) : (
+                <div className="mb-4 text-center py-2 text-slate-400 text-xs font-bold bg-slate-50 rounded-xl border border-dashed border-slate-200">
+                  단어를 선택해서 이곳에 담으세요
+                </div>
+              )}
+
+              {isHost ? (
+                <div className="flex gap-2">
+                  <button 
+                    onClick={mergeWords}
+                    disabled={selectedWords.length < 2}
+                    className="flex-1 bg-blue-500 disabled:bg-slate-300 text-white py-3 rounded-xl font-black text-lg shadow-lg transition-all"
                   >
-                    {item.word}
-                    <span className="text-[10px] opacity-60 ml-1 font-normal">({item.owner})</span>
+                    합치기
                   </button>
-                )
-              })}
+                  <button 
+                    onClick={calculateScores}
+                    className="flex-1 bg-slate-800 text-white py-3 rounded-xl font-black text-lg shadow-lg"
+                  >
+                    점수 계산
+                  </button>
+                </div>
+              ) : (
+                <div className="text-center text-slate-500 text-sm font-bold animate-pulse py-3">방장이 검토 중입니다...</div>
+              )}
             </div>
           </div>
-
-          {isHost ? (
-            <div className="mt-4 space-y-2">
-              <button 
-                onClick={mergeWords}
-                disabled={selectedWords.length < 2}
-                className="w-full bg-indigo-600 disabled:bg-slate-300 text-white py-3 rounded-xl font-black text-lg shadow-lg flex items-center justify-center gap-2 transition-all"
-              >
-                <Merge size={20}/> 선택한 단어 합치기
-              </button>
-              <button 
-                onClick={calculateScores}
-                className="w-full bg-slate-800 text-white py-3 rounded-xl font-black text-lg shadow-lg flex items-center justify-center gap-2"
-              >
-                <CheckCircle2 size={20}/> 검토 완료 (점수 계산)
-              </button>
-            </div>
-          ) : (
-            <div className="mt-4 text-center p-4 bg-slate-100 rounded-xl text-slate-500 font-bold animate-pulse">
-              방장이 정답을 검토하고 있습니다...<br/>"저거 합쳐줘!"라고 외치세요!
-            </div>
-          )}
         </div>
       )}
 
@@ -565,8 +592,9 @@ export default function NeodoNadoGame() {
           </div>
 
           {isHost && (
-            <div className="fixed bottom-6 left-0 w-full px-6 flex justify-center">
-              <button onClick={handleStartRound} className="w-full max-w-md bg-slate-900 text-white py-4 rounded-2xl font-black text-lg shadow-2xl flex items-center justify-center gap-2 active:scale-95 transition-all"><ArrowRight size={20} /> 다음 라운드</button>
+            <div className="fixed bottom-6 left-0 w-full px-6 flex justify-center gap-2">
+              <button onClick={backToReview} className="bg-white text-slate-500 border-2 border-slate-200 p-4 rounded-2xl shadow-lg active:scale-95 transition-all"><Undo2/></button>
+              <button onClick={handleStartRound} className="flex-1 max-w-xs bg-slate-900 text-white py-4 rounded-2xl font-black text-lg shadow-2xl flex items-center justify-center gap-2 active:scale-95 transition-all"><ArrowRight size={20} /> 다음 라운드</button>
             </div>
           )}
         </div>
@@ -574,4 +602,4 @@ export default function NeodoNadoGame() {
 
     </div>
   );
-    }
+        }
