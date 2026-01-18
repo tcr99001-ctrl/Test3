@@ -13,7 +13,7 @@ import {
 } from 'lucide-react';
 
 // ==================================================================
-// [필수] 사용자님의 Firebase 설정값
+// [완료] Firebase 설정값 유지
 // ==================================================================
 const firebaseConfig = {
   apiKey: "AIzaSyBPd5xk9UseJf79GTZogckQmKKwwogneco",
@@ -166,7 +166,6 @@ export default function NeodoNadoGame() {
     await setDoc(doc(db,'rooms',roomCode,'players',user.uid), { name: playerName, score: 0, joinedAt: Date.now(), lastActive: Date.now() });
   };
 
-  // ★ [수정] 데이터 초기화 로직 강화
   const handleStartRound = async () => {
     vibrate();
     const topic = TOPICS[Math.floor(Math.random() * TOPICS.length)];
@@ -175,7 +174,6 @@ export default function NeodoNadoGame() {
     const resetUpdates = players.map(p => updateDoc(doc(db,'rooms',roomCode,'players',p.id), { currentAnswers: null }));
     await Promise.all(resetUpdates);
 
-    // 배열 데이터 초기화 명시
     await updateDoc(doc(db,'rooms',roomCode), {
       status: 'playing', topic, endTime, 
       round: (roomData.round || 0) + 1,
@@ -219,26 +217,42 @@ export default function NeodoNadoGame() {
     });
   };
 
+  // ★ [수정됨] 1인 1단어 선택 로직
   const toggleSelectWord = (wordId) => {
     if(!isHost) return;
     vibrate();
+
+    // 1. 이미 선택된 단어를 눌렀을 경우 -> 해제
     if(selectedWords.includes(wordId)) {
       setSelectedWords(selectedWords.filter(id => id !== wordId));
-    } else {
-      setSelectedWords([...selectedWords, wordId]);
+      return;
     }
+
+    // 2. 새로 누른 경우 -> 해당 참가자가 이미 선택된 게 있는지 확인
+    const safeReviewData = roomData.reviewData || [];
+    const targetItem = safeReviewData.find(w => w.id === wordId);
+    
+    if (!targetItem) return;
+
+    // 현재 선택 목록 중에서, 이번에 누른 단어의 주인(owner)과 같은 사람이 쓴 단어 찾기
+    const otherWordsSelected = selectedWords.filter(id => {
+      const item = safeReviewData.find(w => w.id === id);
+      return item && item.owner !== targetItem.owner; // 주인이 다른 것만 남김 (같은 주인이면 탈락)
+    });
+
+    // 주인이 다른 기존 선택들 + 이번에 선택한 것 (결과적으로 같은 주인의 기존 선택은 교체됨)
+    setSelectedWords([...otherWordsSelected, wordId]);
   };
 
   const mergeWords = async () => {
     if(!isHost || selectedWords.length < 2) return;
     vibrate();
 
-    // ★ [안전장치] 데이터가 없으면 실행 중지
     const safeReviewData = roomData.reviewData || [];
     const targetId = selectedWords[0];
     const targetWordObj = safeReviewData.find(w => w.id === targetId);
     
-    if (!targetWordObj) return; // 에러 방지
+    if (!targetWordObj) return;
 
     const targetWord = targetWordObj.word;
     const groupId = Math.random().toString(36).substr(2,9); 
@@ -298,7 +312,6 @@ export default function NeodoNadoGame() {
     const updates = players.map(p => {
       let roundScore = 0;
       const scoredWords = [];
-      // 안전한 필터링
       const myItems = safeReviewData.filter(item => item.owner === p.name);
       
       myItems.forEach(item => {
@@ -352,7 +365,6 @@ export default function NeodoNadoGame() {
   const isSubmitted = myPlayer?.currentAnswers;
 
   // --- RENDER HELPERS ---
-  // ★ [안전장치] 데이터가 없으면 빈 객체/배열 반환 (Crash 방지)
   const getReviewItems = () => {
     if (!roomData?.reviewData) return {};
     const activeItems = roomData.reviewData.filter(item => !item.mergedGroupId && !selectedWords.includes(item.id));
@@ -605,4 +617,4 @@ export default function NeodoNadoGame() {
 
     </div>
   );
-    }
+}
