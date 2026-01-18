@@ -12,15 +12,15 @@ import {
 } from 'lucide-react';
 
 // ==================================================================
-// [필수] 본인의 Firebase 설정값을 여기에 넣어주세요!
+// [완료] 기존에 사용하시던 Firebase 설정값을 적용했습니다.
 // ==================================================================
 const firebaseConfig = {
-  apiKey: "YOUR_API_KEY",
-  authDomain: "YOUR_PROJECT_ID.firebaseapp.com",
-  projectId: "YOUR_PROJECT_ID",
-  storageBucket: "YOUR_PROJECT_ID.appspot.com",
-  messagingSenderId: "YOUR_SENDER_ID",
-  appId: "YOUR_APP_ID"
+  apiKey: "AIzaSyBPd5xk9UseJf79GTZogckQmKKwwogneco",
+  authDomain: "test-4305d.firebaseapp.com",
+  projectId: "test-4305d",
+  storageBucket: "test-4305d.firebasestorage.app",
+  messagingSenderId: "402376205992",
+  appId: "1:402376205992:web:be662592fa4d5f0efb849d"
 };
 
 // --- Firebase Init ---
@@ -30,11 +30,15 @@ let auth;
 let initError = null;
 
 try {
-  if (!getApps().length) firebaseApp = initializeApp(firebaseConfig);
-  else firebaseApp = getApps()[0];
+  if (!getApps().length) {
+    firebaseApp = initializeApp(firebaseConfig);
+  } else {
+    firebaseApp = getApps()[0];
+  }
   db = getFirestore(firebaseApp);
   auth = getAuth(firebaseApp);
 } catch (e) { 
+  console.error("Firebase Init Error:", e);
   initError = e.message;
 }
 
@@ -73,7 +77,12 @@ export default function NeodoNadoGame() {
       const code = p.get('room');
       if (code && code.length === 4) setRoomCode(code.toUpperCase());
     }
-    if(!auth) return;
+    
+    if(!auth) {
+      if(!initError) setError("Firebase 인증 객체가 없습니다. 설정을 확인하세요.");
+      return;
+    }
+
     const unsub = onAuthStateChanged(auth, u => {
       if(u) setUser(u);
       else signInAnonymously(auth).catch(e => setError("로그인 실패: "+e.message));
@@ -188,20 +197,17 @@ export default function NeodoNadoGame() {
     if(!isHost) return;
     
     // 1. 모든 플레이어의 답변 수집
-    // players state에는 실시간 데이터가 들어있으므로 바로 사용
-    // 단, currentAnswers가 없는(입력 안한) 사람은 빈 배열 처리
     const allPlayerAnswers = players.map(p => ({
       id: p.id,
       name: p.name,
       answers: p.currentAnswers || []
     }));
 
-    // 2. 단어 빈도수 계산 (동음이의어 처리는 정확히 일치하는 것만)
+    // 2. 단어 빈도수 계산
     const frequency = {};
     allPlayerAnswers.forEach(p => {
       p.answers.forEach(word => {
-        // 공백제거 및 소문자 변환(영어일 경우) 등 정규화 가능하나 여기선 그대로
-        const cleanWord = word.trim(); 
+        const cleanWord = word.trim(); // 공백 제거
         if(cleanWord) frequency[cleanWord] = (frequency[cleanWord] || 0) + 1;
       });
     });
@@ -259,6 +265,14 @@ export default function NeodoNadoGame() {
   const myPlayer = players.find(p => p.id === user?.uid);
   const isSubmitted = myPlayer?.currentAnswers;
 
+  if (error) return (
+    <div className="flex h-screen flex-col items-center justify-center bg-yellow-50 text-red-500 font-bold p-6 text-center">
+      <AlertCircle size={40} className="mb-4"/>
+      <p>{error}</p>
+      <button onClick={()=>window.location.reload()} className="mt-4 bg-slate-200 px-4 py-2 rounded text-black">새로고침</button>
+    </div>
+  );
+
   if(!user) return <div className="h-screen flex items-center justify-center bg-yellow-50 font-bold text-yellow-600">Loading...</div>;
 
   return (
@@ -274,15 +288,6 @@ export default function NeodoNadoGame() {
         </div>
         {isJoined && roomCode && <div className="bg-yellow-100 text-yellow-700 px-3 py-1 rounded-lg font-black">{roomCode}</div>}
       </header>
-
-      {/* Error */}
-      {error && (
-        <div className="mx-6 mt-4 p-4 bg-red-100 border-2 border-red-200 rounded-2xl flex items-center gap-3 text-red-600 font-bold">
-          <AlertCircle size={20} />
-          <span className="text-sm">{error}</span>
-          <button onClick={()=>setError(null)} className="ml-auto">✕</button>
-        </div>
-      )}
 
       {/* --- SCENE 1: ENTRANCE --- */}
       {!isJoined && (
