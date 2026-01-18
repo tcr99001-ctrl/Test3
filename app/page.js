@@ -9,11 +9,11 @@ import { getAuth, signInAnonymously, onAuthStateChanged } from 'firebase/auth';
 import { 
   Play, Users, Crown, Copy, CheckCircle2, Link as LinkIcon, 
   Smile, Zap, Trophy, Timer, ArrowRight, RefreshCw, AlertCircle, 
-  Merge, Undo2, ChevronLeft, MousePointerClick, X
+  Merge, Undo2, X
 } from 'lucide-react';
 
 // ==================================================================
-// [완료] 기존 Firebase 설정값 유지
+// [필수] 사용자님의 Firebase 설정값
 // ==================================================================
 const firebaseConfig = {
   apiKey: "AIzaSyBPd5xk9UseJf79GTZogckQmKKwwogneco",
@@ -39,6 +39,7 @@ try {
   db = getFirestore(firebaseApp);
   auth = getAuth(firebaseApp);
 } catch (e) { 
+  console.error("Firebase Init Error:", e);
   initError = e.message;
 }
 
@@ -66,8 +67,7 @@ export default function NeodoNadoGame() {
   const [error, setError] = useState(initError);
   const [copyStatus, setCopyStatus] = useState(null);
   
-  // 검토 단계용 상태 (로컬)
-  const [selectedWords, setSelectedWords] = useState([]); // 병합 대기열 IDs
+  const [selectedWords, setSelectedWords] = useState([]);
 
   const isJoined = user && players.some(p => p.id === user.uid);
   const isHost = roomData?.hostId === user?.uid;
@@ -79,7 +79,12 @@ export default function NeodoNadoGame() {
       const code = p.get('room');
       if (code && code.length === 4) setRoomCode(code.toUpperCase());
     }
-    if(!auth) return;
+    
+    if(!auth) {
+      if(!initError) setError("Firebase 인증 객체가 없습니다. 설정을 확인하세요.");
+      return;
+    }
+
     const unsub = onAuthStateChanged(auth, u => {
       if(u) setUser(u);
       else signInAnonymously(auth).catch(e => setError("로그인 실패: "+e.message));
@@ -146,7 +151,7 @@ export default function NeodoNadoGame() {
     const code = Math.random().toString(36).substring(2,6).toUpperCase();
     await setDoc(doc(db,'rooms',code), {
       hostId: user.uid, status: 'lobby', round: 0,
-      topic: '', endTime: 0, reviewData: [], mergedGroups: [], // mergedGroups: 실행취소용 히스토리
+      topic: '', endTime: 0, reviewData: [], mergedGroups: [],
       createdAt: Date.now()
     });
     await setDoc(doc(db,'rooms',code,'players',user.uid), { name: playerName, score: 0, joinedAt: Date.now(), lastActive: Date.now() });
@@ -161,6 +166,7 @@ export default function NeodoNadoGame() {
     await setDoc(doc(db,'rooms',roomCode,'players',user.uid), { name: playerName, score: 0, joinedAt: Date.now(), lastActive: Date.now() });
   };
 
+  // ★ [수정] 데이터 초기화 로직 강화
   const handleStartRound = async () => {
     vibrate();
     const topic = TOPICS[Math.floor(Math.random() * TOPICS.length)];
@@ -169,10 +175,12 @@ export default function NeodoNadoGame() {
     const resetUpdates = players.map(p => updateDoc(doc(db,'rooms',roomCode,'players',p.id), { currentAnswers: null }));
     await Promise.all(resetUpdates);
 
+    // 배열 데이터 초기화 명시
     await updateDoc(doc(db,'rooms',roomCode), {
       status: 'playing', topic, endTime, 
       round: (roomData.round || 0) + 1,
-      reviewData: [], mergedGroups: []
+      reviewData: [], 
+      mergedGroups: []
     });
     setMyAnswers(['','','','','']);
   };
@@ -185,7 +193,7 @@ export default function NeodoNadoGame() {
     });
   };
 
-  // --- [IMPROVED] Review Logic ---
+  // --- Review Logic ---
   const startReviewPhase = async () => {
     if(!isHost) return;
 
@@ -196,9 +204,9 @@ export default function NeodoNadoGame() {
           rawWords.push({ 
             id: Math.random().toString(36).substr(2,9),
             word: word.trim(), 
-            originalWord: word.trim(), // 복구용 원본 데이터
+            originalWord: word.trim(), 
             owner: p.name, 
-            mergedGroupId: null // 병합된 그룹 ID (null이면 병합 안됨)
+            mergedGroupId: null 
           });
         });
       }
@@ -211,7 +219,6 @@ export default function NeodoNadoGame() {
     });
   };
 
-  // 단어 선택/해제 (로컬 상태)
   const toggleSelectWord = (wordId) => {
     if(!isHost) return;
     vibrate();
@@ -222,26 +229,27 @@ export default function NeodoNadoGame() {
     }
   };
 
-  // 병합 실행
   const mergeWords = async () => {
     if(!isHost || selectedWords.length < 2) return;
     vibrate();
 
-    // 첫 번째 선택된 단어를 대표 단어로 설정
+    // ★ [안전장치] 데이터가 없으면 실행 중지
+    const safeReviewData = roomData.reviewData || [];
     const targetId = selectedWords[0];
-    const targetWordObj = roomData.reviewData.find(w => w.id === targetId);
-    const targetWord = targetWordObj.word;
-    const groupId = Math.random().toString(36).substr(2,9); // 그룹 ID 생성
+    const targetWordObj = safeReviewData.find(w => w.id === targetId);
+    
+    if (!targetWordObj) return; // 에러 방지
 
-    // DB 업데이트
-    const newReviewData = roomData.reviewData.map(item => {
+    const targetWord = targetWordObj.word;
+    const groupId = Math.random().toString(36).substr(2,9); 
+
+    const newReviewData = safeReviewData.map(item => {
       if(selectedWords.includes(item.id)) {
         return { ...item, word: targetWord, mergedGroupId: groupId };
       }
       return item;
     });
 
-    // 히스토리에 추가 (실행 취소용)
     const newGroupInfo = { id: groupId, word: targetWord, count: selectedWords.length };
     const newMergedGroups = [...(roomData.mergedGroups || []), newGroupInfo];
 
@@ -252,21 +260,22 @@ export default function NeodoNadoGame() {
     setSelectedWords([]);
   };
 
-  // 병합 취소 (Undo)
   const undoMerge = async (groupId) => {
     if(!isHost) return;
     if(!window.confirm("이 병합을 취소하시겠습니까?")) return;
     vibrate();
 
-    // 해당 그룹 ID를 가진 단어들을 원상복구
-    const newReviewData = roomData.reviewData.map(item => {
+    const safeReviewData = roomData.reviewData || [];
+    const safeMergedGroups = roomData.mergedGroups || [];
+
+    const newReviewData = safeReviewData.map(item => {
       if(item.mergedGroupId === groupId) {
         return { ...item, word: item.originalWord, mergedGroupId: null };
       }
       return item;
     });
 
-    const newMergedGroups = roomData.mergedGroups.filter(g => g.id !== groupId);
+    const newMergedGroups = safeMergedGroups.filter(g => g.id !== groupId);
 
     await updateDoc(doc(db,'rooms',roomCode), { 
       reviewData: newReviewData,
@@ -274,17 +283,14 @@ export default function NeodoNadoGame() {
     });
   };
 
-  // 결과 집계 (최종 컨펌)
   const calculateScores = async () => {
     if(!isHost) return;
-    
-    // 안전장치: 병합되지 않은 단어가 많은데 넘어가는지 체크? (선택사항)
     if(!window.confirm("검토를 마치고 점수를 집계하시겠습니까?")) return;
-    
     vibrate();
     
+    const safeReviewData = roomData.reviewData || [];
     const frequency = {};
-    roomData.reviewData.forEach(item => {
+    safeReviewData.forEach(item => {
       const w = item.word;
       frequency[w] = (frequency[w] || 0) + 1;
     });
@@ -292,7 +298,8 @@ export default function NeodoNadoGame() {
     const updates = players.map(p => {
       let roundScore = 0;
       const scoredWords = [];
-      const myItems = roomData.reviewData.filter(item => item.owner === p.name);
+      // 안전한 필터링
+      const myItems = safeReviewData.filter(item => item.owner === p.name);
       
       myItems.forEach(item => {
         const count = frequency[item.word] || 0;
@@ -315,7 +322,6 @@ export default function NeodoNadoGame() {
     await updateDoc(doc(db,'rooms',roomCode), { status: 'result', frequency });
   };
 
-  // 결과 화면에서 다시 검토 화면으로 복귀 (실수 방지)
   const backToReview = async () => {
     if(!isHost) return;
     if(!window.confirm("점수 집계를 취소하고 다시 검토하시겠습니까?")) return;
@@ -342,16 +348,14 @@ export default function NeodoNadoGame() {
     setMyAnswers(newArr);
   };
 
-  // --- RENDER ---
-  if(!user) return <div className="h-screen flex items-center justify-center bg-yellow-50 font-bold text-yellow-600">Loading...</div>;
+  const myPlayer = players.find(p => p.id === user?.uid);
+  const isSubmitted = myPlayer?.currentAnswers;
 
-  // 검토 단계 데이터 필터링
+  // --- RENDER HELPERS ---
+  // ★ [안전장치] 데이터가 없으면 빈 객체/배열 반환 (Crash 방지)
   const getReviewItems = () => {
     if (!roomData?.reviewData) return {};
-    // 아직 병합되지 않은 단어들만 참가자별로 그룹화
     const activeItems = roomData.reviewData.filter(item => !item.mergedGroupId && !selectedWords.includes(item.id));
-    
-    // owner별로 그룹핑
     const grouped = {};
     activeItems.forEach(item => {
       if (!grouped[item.owner]) grouped[item.owner] = [];
@@ -364,6 +368,9 @@ export default function NeodoNadoGame() {
     if (!roomData?.reviewData) return [];
     return roomData.reviewData.filter(item => selectedWords.includes(item.id));
   };
+
+  // --- RENDER ---
+  if(!user) return <div className="h-screen flex items-center justify-center bg-yellow-50 font-bold text-yellow-600">Loading...</div>;
 
   return (
     <div className="min-h-screen bg-yellow-50 text-slate-800 font-sans relative overflow-x-hidden selection:bg-yellow-200">
@@ -378,6 +385,12 @@ export default function NeodoNadoGame() {
         </div>
         {isJoined && roomCode && <div className="bg-yellow-100 text-yellow-700 px-3 py-1 rounded-lg font-black">{roomCode}</div>}
       </header>
+
+      {error && (
+        <div className="mx-6 mt-4 p-4 bg-red-100 border-2 border-red-200 rounded-2xl flex items-center gap-3 text-red-600 font-bold">
+          <AlertCircle size={20} /> <span className="text-sm">{error}</span> <button onClick={()=>setError(null)} className="ml-auto">✕</button>
+        </div>
+      )}
 
       {/* 1. Entrance */}
       {!isJoined && (
@@ -453,15 +466,14 @@ export default function NeodoNadoGame() {
         </div>
       )}
 
-      {/* 4. Review Phase (UI 개선됨) */}
+      {/* 4. Review Phase */}
       {isJoined && roomData?.status === 'review' && (
-        <div className="flex flex-col h-[calc(100vh-80px)] p-4 max-w-lg mx-auto relative">
+        <div className="flex flex-col h-[calc(100vh-80px)] p-4 max-w-lg mx-auto pb-20">
           <div className="text-center mb-4">
-            <h3 className="text-xl font-black text-slate-800">정답 검토</h3>
-            <p className="text-xs text-slate-400 font-bold">비슷한 단어를 눌러서 합쳐주세요!</p>
+            <h3 className="text-xl font-black text-slate-800">정답 검토 & 합치기</h3>
+            <p className="text-xs text-slate-400 font-bold">비슷한 단어를 눌러서 합쳐주세요! (방장 전용)</p>
           </div>
 
-          {/* User Cards Grid */}
           <div className="flex-1 overflow-y-auto space-y-4 pb-48 custom-scrollbar">
             {Object.entries(getReviewItems()).map(([owner, items]) => (
               <div key={owner} className="bg-white border-2 border-slate-100 rounded-2xl p-3 shadow-sm">
@@ -472,7 +484,11 @@ export default function NeodoNadoGame() {
                       key={item.id} 
                       onClick={() => toggleSelectWord(item.id)}
                       disabled={!isHost}
-                      className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-sm font-bold text-slate-700 hover:bg-blue-50 hover:border-blue-300 transition-colors"
+                      className={`px-3 py-2 rounded-xl font-bold border-2 transition-all text-sm flex items-center gap-1
+                        ${selectedWords.includes(item.id) 
+                          ? 'bg-blue-600 border-blue-600 text-white shadow-lg scale-105' 
+                          : 'bg-slate-50 border-slate-200 text-slate-700 hover:border-blue-300'}
+                      `}
                     >
                       {item.word}
                     </button>
@@ -481,12 +497,12 @@ export default function NeodoNadoGame() {
               </div>
             ))}
             
-            {/* Merged History (Undo) */}
-            {roomData.mergedGroups?.length > 0 && (
+            {/* Merged History */}
+            {(roomData.mergedGroups || []).length > 0 && (
               <div className="bg-blue-50 border-2 border-blue-100 rounded-2xl p-4 mt-6">
                 <p className="text-xs font-black text-blue-400 mb-2 flex items-center gap-1"><Merge size={12}/> 합쳐진 단어들 (누르면 취소)</p>
                 <div className="flex flex-wrap gap-2">
-                  {roomData.mergedGroups.map(group => (
+                  {(roomData.mergedGroups || []).map(group => (
                     <button 
                       key={group.id} 
                       onClick={() => undoMerge(group.id)}
@@ -501,11 +517,9 @@ export default function NeodoNadoGame() {
             )}
           </div>
 
-          {/* Staging Area (Bottom Fixed) */}
+          {/* Staging Area */}
           <div className="fixed bottom-0 left-0 w-full bg-white border-t-2 border-slate-100 p-4 rounded-t-3xl shadow-[0_-10px_40px_rgba(0,0,0,0.1)] z-10">
             <div className="max-w-lg mx-auto">
-              
-              {/* Selected Words */}
               {selectedWords.length > 0 ? (
                 <div className="mb-4">
                   <p className="text-xs font-bold text-slate-400 mb-2 ml-1">합칠 단어 ({selectedWords.length})</p>
@@ -525,19 +539,8 @@ export default function NeodoNadoGame() {
 
               {isHost ? (
                 <div className="flex gap-2">
-                  <button 
-                    onClick={mergeWords}
-                    disabled={selectedWords.length < 2}
-                    className="flex-1 bg-blue-500 disabled:bg-slate-300 text-white py-3 rounded-xl font-black text-lg shadow-lg transition-all"
-                  >
-                    합치기
-                  </button>
-                  <button 
-                    onClick={calculateScores}
-                    className="flex-1 bg-slate-800 text-white py-3 rounded-xl font-black text-lg shadow-lg"
-                  >
-                    점수 계산
-                  </button>
+                  <button onClick={mergeWords} disabled={selectedWords.length < 2} className="flex-1 bg-blue-500 disabled:bg-slate-300 text-white py-3 rounded-xl font-black text-lg shadow-lg transition-all">합치기</button>
+                  <button onClick={calculateScores} className="flex-1 bg-slate-800 text-white py-3 rounded-xl font-black text-lg shadow-lg">점수 계산</button>
                 </div>
               ) : (
                 <div className="text-center text-slate-500 text-sm font-bold animate-pulse py-3">방장이 검토 중입니다...</div>
@@ -602,4 +605,4 @@ export default function NeodoNadoGame() {
 
     </div>
   );
-        }
+    }
