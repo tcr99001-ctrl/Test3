@@ -31,8 +31,11 @@ let auth;
 let initError = null;
 
 try {
-  if (!getApps().length) firebaseApp = initializeApp(firebaseConfig);
-  else firebaseApp = getApps()[0];
+  if (!getApps().length) {
+    firebaseApp = initializeApp(firebaseConfig);
+  } else {
+    firebaseApp = getApps()[0];
+  }
   db = getFirestore(firebaseApp);
   auth = getAuth(firebaseApp);
 } catch (e) { 
@@ -52,7 +55,7 @@ const ROUND_TIME = 60;
 
 const vibrate = () => { if (typeof navigator !== 'undefined' && navigator.vibrate) navigator.vibrate(30); };
 
-export default function DiscussionNeodoNado() {
+export default function SpeakerDrivenNeodoNado() {
   const [user, setUser] = useState(null);
   const [roomCode, setRoomCode] = useState('');
   const [playerName, setPlayerName] = useState('');
@@ -65,6 +68,10 @@ export default function DiscussionNeodoNado() {
 
   const isJoined = user && players.some(p => p.id === user.uid);
   const isHost = roomData?.hostId === user?.uid;
+  
+  // 현재 발표자인지 확인
+  const currentSpeaker = players[roomData?.currentSpeakerIndex];
+  const isMyTurn = currentSpeaker?.id === user?.uid;
 
   // --- Auth & Data Sync ---
   useEffect(() => {
@@ -108,7 +115,6 @@ export default function DiscussionNeodoNado() {
       const timer = setInterval(() => setTimeLeft(p => Math.max(0, p - 1)), 1000);
       return () => clearInterval(timer);
     }
-    // 시간 종료 시 '발표(Discussion)' 단계로 자동 이동
     if (roomData?.status === 'playing' && timeLeft === 0 && isHost) {
       startDiscussionPhase();
     }
@@ -142,7 +148,7 @@ export default function DiscussionNeodoNado() {
     await setDoc(doc(db,'rooms',code), {
       hostId: user.uid, status: 'lobby', round: 0,
       topic: '', endTime: 0, 
-      currentSpeakerIndex: 0, currentActiveWord: null, submittedMatches: [], // 토론용 데이터
+      currentSpeakerIndex: 0, currentActiveWord: null, submittedMatches: [], 
       createdAt: Date.now()
     });
     await setDoc(doc(db,'rooms',code,'players',user.uid), { name: playerName, score: 0, joinedAt: Date.now(), lastActive: Date.now() });
@@ -162,7 +168,6 @@ export default function DiscussionNeodoNado() {
     const topic = TOPICS[Math.floor(Math.random() * TOPICS.length)];
     const endTime = Date.now() + (ROUND_TIME * 1000);
     
-    // 초기화: currentAnswers(답안), scoredWords(이미 점수받은 단어들)
     const resetUpdates = players.map(p => updateDoc(doc(db,'rooms',roomCode,'players',p.id), { currentAnswers: null, scoredWords: [] }));
     await Promise.all(resetUpdates);
 
@@ -184,7 +189,7 @@ export default function DiscussionNeodoNado() {
     });
   };
 
-  // --- [NEW] Discussion Phase Logic ---
+  // --- Discussion Phase Logic ---
   
   const startDiscussionPhase = async () => {
     if(!isHost) return;
@@ -201,14 +206,13 @@ export default function DiscussionNeodoNado() {
     vibrate();
     await updateDoc(doc(db, 'rooms', roomCode), {
       currentActiveWord: word,
-      submittedMatches: [] // 초기화
+      submittedMatches: [] 
     });
   };
 
   // 2. 청중: 내 단어 제출하기 (공감)
   const submitMatch = async (word) => {
     vibrate();
-    // 이미 제출했는지 확인
     const alreadySubmitted = roomData.submittedMatches?.some(m => m.uid === user.uid);
     if(alreadySubmitted) return;
 
@@ -218,9 +222,9 @@ export default function DiscussionNeodoNado() {
     });
   };
 
-  // 3. 방장: 이상한 답변 반려시키기
+  // 3. [권한 변경됨] 발표자: 이상한 답변 반려시키기
   const rejectMatch = async (targetUid) => {
-    if(!isHost) return;
+    if(!isMyTurn) return; // 발표자만 가능
     vibrate();
     const newMatches = roomData.submittedMatches.filter(m => m.uid !== targetUid);
     await updateDoc(doc(db, 'rooms', roomCode), {
@@ -228,16 +232,14 @@ export default function DiscussionNeodoNado() {
     });
   };
 
-  // 4. 방장: 점수 확정 및 턴 넘기기
+  // 4. [권한 변경됨] 발표자: 점수 확정 및 턴 넘기기
   const confirmScoreAndNext = async () => {
-    if(!isHost || !roomData.currentActiveWord) return;
+    if(!isMyTurn || !roomData.currentActiveWord) return; // 발표자만 가능
     vibrate();
 
-    // 점수 계산: 발표자(1) + 매칭된 사람 수
     const matchCount = roomData.submittedMatches.length;
-    const scoreToAdd = 1 + matchCount; // 발표자 포함 점수
+    const scoreToAdd = 1 + matchCount; 
 
-    // A. 발표자 업데이트 (점수 추가 + 단어 사용처리)
     const speaker = players[roomData.currentSpeakerIndex];
     if (speaker) {
       const newScored = [...(speaker.scoredWords || []), roomData.currentActiveWord];
@@ -247,7 +249,6 @@ export default function DiscussionNeodoNado() {
       });
     }
 
-    // B. 매칭된 청중 업데이트
     const matchUpdates = roomData.submittedMatches.map(match => {
       const p = players.find(player => player.id === match.uid);
       if(p) {
@@ -261,14 +262,9 @@ export default function DiscussionNeodoNado() {
     });
     await Promise.all(matchUpdates);
 
-    // C. 다음 턴 계산 (라운드 로빈)
+    // 다음 턴으로
     let nextIndex = (roomData.currentSpeakerIndex + 1) % players.length;
-    let attempts = 0;
     
-    // 남은 단어가 있는 사람을 찾을 때까지 돔
-    // (모든 사람이 단어를 다 썼는지 체크하는 로직은 간소화를 위해 생략, 무한루프 방지)
-    
-    // 상태 초기화
     await updateDoc(doc(db, 'rooms', roomCode), {
       currentActiveWord: null,
       submittedMatches: [],
@@ -276,7 +272,7 @@ export default function DiscussionNeodoNado() {
     });
   };
 
-  // 5. 라운드 종료 (방장 수동)
+  // 5. 라운드 종료 (방장 수동) - 이건 방장이 하는 게 맞습니다 (흐름 제어)
   const finishRound = async () => {
     if(!isHost) return;
     if(!window.confirm("모든 단어 확인이 끝났나요? 결과를 보러 갑니다.")) return;
@@ -304,18 +300,15 @@ export default function DiscussionNeodoNado() {
     setMyAnswers(newArr);
   };
 
-  // --- RENDER ---
   const myPlayer = players.find(p => p.id === user?.uid);
   const isSubmitted = myPlayer?.currentAnswers;
-  const currentSpeaker = players[roomData?.currentSpeakerIndex];
-  const isMyTurn = currentSpeaker?.id === user?.uid;
 
+  // --- RENDER ---
   if(!user) return <div className="h-screen flex items-center justify-center bg-yellow-50 font-bold text-yellow-600">Loading...</div>;
 
   return (
     <div className="min-h-screen bg-yellow-50 text-slate-800 font-sans relative overflow-x-hidden selection:bg-yellow-200">
       
-      {/* Header */}
       <header className="bg-white border-b-4 border-yellow-400 px-6 py-4 flex items-center justify-between sticky top-0 z-20 shadow-sm">
         <div className="flex items-center gap-2">
           <div className="p-2 bg-yellow-400 rounded-xl text-white shadow-[2px_2px_0px_rgba(0,0,0,0.1)]">
@@ -406,11 +399,10 @@ export default function DiscussionNeodoNado() {
         </div>
       )}
 
-      {/* 4. [NEW] Discussion Phase (발표 및 공감) */}
+      {/* 4. Discussion Phase (Speaker Controlled) */}
       {isJoined && roomData?.status === 'discussion' && currentSpeaker && (
         <div className="flex flex-col h-[calc(100vh-80px)] p-4 max-w-lg mx-auto pb-20 relative">
           
-          {/* Header: Who is speaking? */}
           <div className={`text-center mb-4 p-3 rounded-2xl border-2 ${isMyTurn ? 'bg-blue-50 border-blue-200' : 'bg-white border-slate-100'}`}>
             <p className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-1">Speaker</p>
             <div className="flex items-center justify-center gap-2">
@@ -421,7 +413,6 @@ export default function DiscussionNeodoNado() {
             </div>
           </div>
 
-          {/* Main Stage: Active Word & Matches */}
           <div className="flex-1 bg-white border-2 border-slate-100 rounded-[2rem] p-4 shadow-sm flex flex-col items-center justify-center relative overflow-hidden">
             {roomData.currentActiveWord ? (
               <div className="w-full text-center space-y-6 animate-in zoom-in">
@@ -438,7 +429,7 @@ export default function DiscussionNeodoNado() {
                     {roomData.submittedMatches?.map((match, i) => (
                       <div key={i} className="bg-blue-50 text-blue-600 px-3 py-1.5 rounded-xl text-sm font-bold flex items-center gap-2 border border-blue-100">
                         <span>{match.name}: {match.word}</span>
-                        {isHost && (
+                        {isMyTurn && (
                           <button onClick={() => rejectMatch(match.uid)} className="text-red-400 hover:text-red-600">
                             <XCircle size={14} />
                           </button>
@@ -459,14 +450,13 @@ export default function DiscussionNeodoNado() {
             )}
           </div>
 
-          {/* Bottom Sheet: My Words */}
           <div className="fixed bottom-0 left-0 w-full bg-white border-t-2 border-slate-100 p-4 rounded-t-3xl shadow-[0_-10px_40px_rgba(0,0,0,0.1)] z-10">
             <div className="max-w-lg mx-auto">
               <p className="text-xs font-bold text-slate-400 mb-3 ml-1">
                 {isMyTurn ? "📢 내 단어 (발표할 것 선택)" : (roomData.currentActiveWord ? "✋ 공감되는 단어 제출하기" : "내 단어 목록")}
               </p>
               
-              <div className="flex flex-wrap gap-2 mb-4">
+              <div className="flex flex-wrap gap-2 mb-4 max-h-32 overflow-y-auto">
                 {myPlayer?.currentAnswers?.map((word, i) => {
                   const isUsed = myPlayer.scoredWords?.includes(word);
                   return (
@@ -491,14 +481,18 @@ export default function DiscussionNeodoNado() {
                 })}
               </div>
 
-              {isHost && (
-                <div className="flex gap-2">
-                  <button onClick={confirmScoreAndNext} disabled={!roomData.currentActiveWord} className="flex-1 bg-slate-800 disabled:bg-slate-300 text-white py-3 rounded-xl font-black text-lg shadow-lg">
+              <div className="flex gap-2">
+                {isMyTurn ? (
+                  <button onClick={confirmScoreAndNext} disabled={!roomData.currentActiveWord} className="flex-1 bg-slate-800 disabled:bg-slate-300 text-white py-3 rounded-xl font-black text-lg shadow-lg transition-all">
                     <CheckCircle2 className="inline mr-2" size={18}/> 점수 인정 & 다음
                   </button>
-                  <button onClick={finishRound} className="bg-red-50 text-red-500 border-2 border-red-100 px-4 rounded-xl font-bold">종료</button>
-                </div>
-              )}
+                ) : (
+                  <div className="flex-1 text-center text-slate-400 text-sm font-bold py-3 bg-slate-50 rounded-xl">발표자가 진행 중입니다...</div>
+                )}
+                {isHost && (
+                  <button onClick={finishRound} className="bg-red-50 text-red-500 border-2 border-red-100 px-4 rounded-xl font-bold">라운드 종료</button>
+                )}
+              </div>
             </div>
           </div>
         </div>
@@ -508,18 +502,17 @@ export default function DiscussionNeodoNado() {
       {isJoined && roomData?.status === 'result' && (
         <div className="p-4 max-w-lg mx-auto flex flex-col h-[calc(100vh-80px)]">
           <div className="text-center mb-6">
-            <span className="text-xs font-bold text-slate-400 uppercase bg-white px-3 py-1 rounded-full border border-slate-200">Round {roomData.round} Result</span>
-            <h2 className="text-2xl font-black text-slate-800 mt-2">{roomData.topic}</h2>
+            <span className="text-xs font-bold text-slate-400 uppercase bg-white px-3 py-1 rounded-full border border-slate-200">Total Ranking</span>
+            <h2 className="text-2xl font-black text-slate-800 mt-2">최종 결과</h2>
           </div>
 
           <div className="flex-1 overflow-y-auto space-y-4 pb-20 custom-scrollbar">
-            {/* 랭킹 */}
             <div className="bg-white p-4 rounded-[2rem] border border-slate-200 shadow-sm">
-              <h4 className="text-sm font-black text-slate-400 mb-2 px-2 flex items-center gap-2"><Trophy size={16}/> 최종 순위</h4>
+              <h4 className="text-sm font-black text-slate-400 mb-4 px-2 flex items-center gap-2"><Trophy size={16}/> 순위표</h4>
               {players.sort((a,b) => b.score - a.score).map((p, i) => (
                 <div key={p.id} className="flex justify-between items-center p-3 border-b border-slate-50 last:border-0">
-                  <div className="flex items-center gap-3"><span className={`font-black w-4 text-center ${i===0?'text-yellow-500 text-xl':'text-slate-300'}`}>{i+1}</span><span className="font-bold text-slate-700">{p.name}</span></div>
-                  <span className="font-black text-slate-800">{p.score}점</span>
+                  <div className="flex items-center gap-3"><span className={`font-black w-6 text-center ${i===0?'text-yellow-500 text-2xl':'text-slate-300 text-lg'}`}>{i+1}</span><span className="font-bold text-slate-700">{p.name}</span></div>
+                  <span className="font-black text-slate-800 text-lg">{p.score}점</span>
                 </div>
               ))}
             </div>
@@ -535,4 +528,4 @@ export default function DiscussionNeodoNado() {
 
     </div>
   );
-        }
+    }
