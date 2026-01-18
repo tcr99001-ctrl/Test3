@@ -8,19 +8,19 @@ import {
 import { getAuth, signInAnonymously, onAuthStateChanged } from 'firebase/auth';
 import { 
   Play, Users, Crown, Copy, CheckCircle2, Link as LinkIcon, 
-  Smile, Zap, Trophy, Timer, ArrowRight, RefreshCw, AlertCircle, Merge, Wand2
+  Smile, Zap, Trophy, Timer, ArrowRight, RefreshCw, AlertCircle, Merge
 } from 'lucide-react';
 
 // ==================================================================
-// [필수] 본인의 Firebase 설정값
+// [완료] 기존에 사용하시던 Firebase 설정값을 적용했습니다.
 // ==================================================================
 const firebaseConfig = {
-  apiKey: "YOUR_API_KEY",
-  authDomain: "YOUR_PROJECT_ID.firebaseapp.com",
-  projectId: "YOUR_PROJECT_ID",
-  storageBucket: "YOUR_PROJECT_ID.appspot.com",
-  messagingSenderId: "YOUR_SENDER_ID",
-  appId: "YOUR_APP_ID"
+  apiKey: "AIzaSyBPd5xk9UseJf79GTZogckQmKKwwogneco",
+  authDomain: "test-4305d.firebaseapp.com",
+  projectId: "test-4305d",
+  storageBucket: "test-4305d.firebasestorage.app",
+  messagingSenderId: "402376205992",
+  appId: "1:402376205992:web:be662592fa4d5f0efb849d"
 };
 
 // --- Firebase Init ---
@@ -30,11 +30,15 @@ let auth;
 let initError = null;
 
 try {
-  if (!getApps().length) firebaseApp = initializeApp(firebaseConfig);
-  else firebaseApp = getApps()[0];
+  if (!getApps().length) {
+    firebaseApp = initializeApp(firebaseConfig);
+  } else {
+    firebaseApp = getApps()[0];
+  }
   db = getFirestore(firebaseApp);
   auth = getAuth(firebaseApp);
 } catch (e) { 
+  console.error("Firebase Init Error:", e);
   initError = e.message;
 }
 
@@ -63,7 +67,7 @@ export default function NeodoNadoGame() {
   const [copyStatus, setCopyStatus] = useState(null);
   
   // 검토 단계용 상태
-  const [selectedWords, setSelectedWords] = useState([]); // 병합하려고 선택한 단어 ID들
+  const [selectedWords, setSelectedWords] = useState([]); 
 
   const isJoined = user && players.some(p => p.id === user.uid);
   const isHost = roomData?.hostId === user?.uid;
@@ -75,7 +79,12 @@ export default function NeodoNadoGame() {
       const code = p.get('room');
       if (code && code.length === 4) setRoomCode(code.toUpperCase());
     }
-    if(!auth) return;
+    
+    if(!auth) {
+      if(!initError) setError("Firebase 인증 객체가 없습니다. 설정을 확인하세요.");
+      return;
+    }
+
     const unsub = onAuthStateChanged(auth, u => {
       if(u) setUser(u);
       else signInAnonymously(auth).catch(e => setError("로그인 실패: "+e.message));
@@ -125,6 +134,17 @@ export default function NeodoNadoGame() {
     return () => clearInterval(t);
   }, [isJoined, roomCode, user]);
 
+  useEffect(() => {
+    if(!isHost || !players.length) return;
+    const cl = setInterval(() => {
+      const now = Date.now();
+      players.forEach(async p => {
+        if(p.lastActive && now - p.lastActive > 20000) try { await deleteDoc(doc(db,'rooms',roomCode,'players',p.id)); } catch(e){}
+      });
+    }, 10000);
+    return () => clearInterval(cl);
+  }, [isHost, players, roomCode]);
+
   // --- Game Actions ---
   const handleCreate = async () => {
     if(!playerName) return setError("이름을 입력하세요");
@@ -152,14 +172,13 @@ export default function NeodoNadoGame() {
     const topic = TOPICS[Math.floor(Math.random() * TOPICS.length)];
     const endTime = Date.now() + (ROUND_TIME * 1000);
     
-    // 초기화
     const resetUpdates = players.map(p => updateDoc(doc(db,'rooms',roomCode,'players',p.id), { currentAnswers: null }));
     await Promise.all(resetUpdates);
 
     await updateDoc(doc(db,'rooms',roomCode), {
       status: 'playing', topic, endTime, 
       round: (roomData.round || 0) + 1,
-      reviewData: [] // 검토 데이터 초기화
+      reviewData: []
     });
     setMyAnswers(['','','','','']);
   };
@@ -172,20 +191,19 @@ export default function NeodoNadoGame() {
     });
   };
 
-  // --- [NEW] Review Phase Logic (검토 시작) ---
+  // --- Review Phase Logic ---
   const startReviewPhase = async () => {
     if(!isHost) return;
 
-    // 1. 모든 플레이어의 답변 수집 및 초기 구조화
     const rawWords = [];
     players.forEach(p => {
       if(p.currentAnswers) {
         p.currentAnswers.forEach(word => {
           rawWords.push({ 
-            id: Math.random().toString(36).substr(2,9), // 고유 ID
+            id: Math.random().toString(36).substr(2,9),
             word: word.trim(), 
             owner: p.name, 
-            mergedTo: null // 병합될 경우 대표 단어 ID 저장
+            mergedTo: null 
           });
         });
       }
@@ -197,7 +215,6 @@ export default function NeodoNadoGame() {
     });
   };
 
-  // --- [NEW] Merge Logic (단어 합치기) ---
   const toggleSelectWord = (wordId) => {
     if(!isHost) return;
     vibrate();
@@ -212,40 +229,35 @@ export default function NeodoNadoGame() {
     if(!isHost || selectedWords.length < 2) return;
     vibrate();
 
-    // 선택된 단어 중 첫 번째 단어를 '대표 단어'로 설정
     const targetId = selectedWords[0];
     const targetWord = roomData.reviewData.find(w => w.id === targetId).word;
 
-    // DB 업데이트: 선택된 단어들의 word를 대표 단어로 통일
     const newReviewData = roomData.reviewData.map(item => {
       if(selectedWords.includes(item.id)) {
-        return { ...item, word: targetWord }; // 단어 텍스트 자체를 변경
+        return { ...item, word: targetWord };
       }
       return item;
     });
 
     await updateDoc(doc(db,'rooms',roomCode), { reviewData: newReviewData });
-    setSelectedWords([]); // 선택 초기화
+    setSelectedWords([]);
   };
 
-  // --- Scoring Logic (최종 집계) ---
+  // --- Scoring Logic ---
   const calculateScores = async () => {
     if(!isHost) return;
     vibrate();
     
-    // 1. 검토가 끝난 reviewData를 기반으로 빈도 계산
     const frequency = {};
     roomData.reviewData.forEach(item => {
       const w = item.word;
       frequency[w] = (frequency[w] || 0) + 1;
     });
 
-    // 2. 각 플레이어별 점수 부여
     const updates = players.map(p => {
       let roundScore = 0;
       const scoredWords = [];
 
-      // 이 플레이어가 제출했던 단어 찾기
       const myItems = roomData.reviewData.filter(item => item.owner === p.name);
       
       myItems.forEach(item => {
@@ -269,7 +281,6 @@ export default function NeodoNadoGame() {
     await updateDoc(doc(db,'rooms',roomCode), { status: 'result', frequency });
   };
 
-  // --- UI Helpers ---
   const copyInviteLink = () => {
     if (typeof window === 'undefined') return;
     const url = `${window.location.origin.split('?')[0]}?room=${roomCode}`;
@@ -294,6 +305,14 @@ export default function NeodoNadoGame() {
   const isSubmitted = myPlayer?.currentAnswers;
 
   // --- RENDER ---
+  if (error) return (
+    <div className="flex h-screen flex-col items-center justify-center bg-yellow-50 text-red-500 font-bold p-6 text-center">
+      <AlertCircle size={40} className="mb-4"/>
+      <p>{error}</p>
+      <button onClick={()=>window.location.reload()} className="mt-4 bg-slate-200 px-4 py-2 rounded text-black">새로고침</button>
+    </div>
+  );
+
   if(!user) return <div className="h-screen flex items-center justify-center bg-yellow-50 font-bold text-yellow-600">Loading...</div>;
 
   return (
@@ -310,12 +329,6 @@ export default function NeodoNadoGame() {
         {isJoined && roomCode && <div className="bg-yellow-100 text-yellow-700 px-3 py-1 rounded-lg font-black">{roomCode}</div>}
       </header>
 
-      {error && (
-        <div className="mx-6 mt-4 p-4 bg-red-100 border-2 border-red-200 rounded-2xl flex items-center gap-3 text-red-600 font-bold">
-          <AlertCircle size={20} /> <span className="text-sm">{error}</span> <button onClick={()=>setError(null)} className="ml-auto">✕</button>
-        </div>
-      )}
-
       {/* 1. Entrance */}
       {!isJoined && (
         <div className="p-6 max-w-md mx-auto mt-10 animate-in fade-in zoom-in-95">
@@ -324,11 +337,28 @@ export default function NeodoNadoGame() {
               <h2 className="text-3xl font-black text-slate-800 mb-1">공감 게임</h2>
               <p className="text-slate-400 text-sm font-bold">텔레파시가 통하는 친구는?</p>
             </div>
-            <input value={playerName} onChange={e=>setPlayerName(e.target.value)} placeholder="닉네임" className="w-full bg-slate-50 border-2 border-slate-200 rounded-xl px-5 py-4 text-lg font-bold outline-none focus:border-yellow-400 transition-all"/>
-            {!roomCode && <button onClick={handleCreate} className="w-full bg-yellow-400 hover:bg-yellow-500 text-white py-4 rounded-xl font-black text-xl shadow-[4px_4px_0px_rgba(0,0,0,0.1)] active:translate-y-[2px] active:shadow-[2px_2px_0px_rgba(0,0,0,0.1)] transition-all">방 만들기</button>}
+            
+            <input 
+              value={playerName} onChange={e=>setPlayerName(e.target.value)} 
+              placeholder="닉네임" 
+              className="w-full bg-slate-50 border-2 border-slate-200 rounded-xl px-5 py-4 text-lg font-bold outline-none focus:border-yellow-400 transition-all"
+            />
+            
+            {!roomCode && (
+              <button onClick={handleCreate} className="w-full bg-yellow-400 hover:bg-yellow-500 text-white py-4 rounded-xl font-black text-xl shadow-[4px_4px_0px_rgba(0,0,0,0.1)] active:translate-y-[2px] active:shadow-[2px_2px_0px_rgba(0,0,0,0.1)] transition-all">
+                방 만들기
+              </button>
+            )}
+
             <div className="flex gap-3">
-              <input value={roomCode} onChange={e=>setRoomCode(e.target.value.toUpperCase())} placeholder="코드" maxLength={4} className="flex-1 bg-slate-50 border-2 border-slate-200 rounded-xl text-center font-mono font-black text-xl outline-none focus:border-yellow-400"/>
-              <button onClick={handleJoin} className="flex-[1.5] bg-slate-800 hover:bg-slate-700 text-white py-4 rounded-xl font-bold shadow-[4px_4px_0px_rgba(0,0,0,0.2)] active:translate-y-[2px] active:shadow-[2px_2px_0px_rgba(0,0,0,0.2)] transition-all">입장</button>
+              <input 
+                value={roomCode} onChange={e=>setRoomCode(e.target.value.toUpperCase())} 
+                placeholder="코드" maxLength={4}
+                className="flex-1 bg-slate-50 border-2 border-slate-200 rounded-xl text-center font-mono font-black text-xl outline-none focus:border-yellow-400"
+              />
+              <button onClick={handleJoin} className="flex-[1.5] bg-slate-800 hover:bg-slate-700 text-white py-4 rounded-xl font-bold shadow-[4px_4px_0px_rgba(0,0,0,0.2)] active:translate-y-[2px] active:shadow-[2px_2px_0px_rgba(0,0,0,0.2)] transition-all">
+                입장
+              </button>
             </div>
           </div>
         </div>
@@ -338,13 +368,19 @@ export default function NeodoNadoGame() {
       {isJoined && roomData?.status === 'lobby' && (
         <div className="p-6 max-w-md mx-auto space-y-6 animate-in slide-in-from-bottom-4">
           <div className="bg-white p-6 rounded-[2rem] border-4 border-blue-100 shadow-xl flex justify-between items-center">
-            <div><p className="text-blue-400 text-xs font-black uppercase tracking-widest">Players</p><h2 className="text-4xl font-black text-slate-800">{players.length} <span className="text-xl text-slate-300">/ 20</span></h2></div>
+            <div>
+              <p className="text-blue-400 text-xs font-black uppercase tracking-widest">Players</p>
+              <h2 className="text-4xl font-black text-slate-800">{players.length} <span className="text-xl text-slate-300">/ 20</span></h2>
+            </div>
             <Users size={40} className="text-blue-200"/>
           </div>
+
           <div className="bg-white border-2 border-slate-100 rounded-[2rem] p-4 min-h-[300px] flex flex-col shadow-sm">
             <div className="flex justify-between items-center mb-4 px-2">
               <span className="text-xs font-black text-slate-400 uppercase">대기 명단</span>
-              <button onClick={copyInviteLink} className="text-[10px] font-bold text-white bg-slate-800 px-3 py-1.5 rounded-full flex gap-1 hover:bg-slate-700 transition-colors">{copyStatus==='link'?<CheckCircle2 size={12}/>:<LinkIcon size={12}/>} 초대 링크</button>
+              <button onClick={copyInviteLink} className="text-[10px] font-bold text-white bg-slate-800 px-3 py-1.5 rounded-full flex gap-1 hover:bg-slate-700 transition-colors">
+                {copyStatus==='link'?<CheckCircle2 size={12}/>:<LinkIcon size={12}/>} 초대 링크
+              </button>
             </div>
             <div className="flex-1 overflow-y-auto space-y-2 pr-1 custom-scrollbar">
               {players.map(p => (
@@ -353,47 +389,83 @@ export default function NeodoNadoGame() {
                     <div className={`w-3 h-3 rounded-full ${p.id===user.uid?'bg-blue-500':'bg-slate-300'}`}></div>
                     <span className={`font-bold ${p.id===user.uid ? 'text-blue-600' : 'text-slate-600'}`}>{p.name}</span>
                   </div>
-                  <div className="flex items-center gap-2"><span className="text-xs font-bold text-slate-400">{p.score}점</span>{p.id===roomData.hostId && <Crown size={16} className="text-yellow-500" />}</div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-bold text-slate-400">{p.score}점</span>
+                    {p.id===roomData.hostId && <Crown size={16} className="text-yellow-500" />}
+                  </div>
                 </div>
               ))}
             </div>
           </div>
-          {isHost ? <button onClick={handleStartRound} className="w-full bg-blue-500 hover:bg-blue-600 text-white p-5 rounded-2xl font-black text-xl shadow-[0_8px_20px_rgba(59,130,246,0.3)] flex items-center justify-center gap-2 active:scale-95 transition-all"><Play size={24} fill="currentColor"/> 게임 시작</button> : <div className="text-center text-slate-400 font-bold animate-pulse py-4">방장이 곧 시작합니다...</div>}
+
+          {isHost ? (
+            <button onClick={handleStartRound} className="w-full bg-blue-500 hover:bg-blue-600 text-white p-5 rounded-2xl font-black text-xl shadow-[0_8px_20px_rgba(59,130,246,0.3)] flex items-center justify-center gap-2 active:scale-95 transition-all">
+              <Play size={24} fill="currentColor"/> 게임 시작
+            </button>
+          ) : (
+            <div className="text-center text-slate-400 font-bold animate-pulse py-4">방장이 곧 시작합니다...</div>
+          )}
         </div>
       )}
 
       {/* 3. Input Phase */}
       {isJoined && roomData?.status === 'playing' && (
         <div className="flex flex-col h-[calc(100vh-80px)] p-4 max-w-lg mx-auto pb-20">
+          
+          {/* Topic Card */}
           <div className="bg-white border-2 border-yellow-400 p-6 rounded-3xl shadow-[4px_4px_0px_#facc15] text-center mb-6 relative overflow-hidden">
-            <div className="absolute top-0 left-0 w-full h-1 bg-slate-100"><div className="h-full bg-yellow-400 transition-all duration-1000" style={{width: `${(timeLeft/ROUND_TIME)*100}%`}}></div></div>
+            <div className="absolute top-0 left-0 w-full h-1 bg-slate-100">
+              <div className="h-full bg-yellow-400 transition-all duration-1000" style={{width: `${(timeLeft/ROUND_TIME)*100}%`}}></div>
+            </div>
             <p className="text-yellow-500 text-xs font-black uppercase tracking-widest mb-1">주제어</p>
             <h2 className="text-3xl font-black text-slate-800 break-keep leading-tight">{roomData.topic}</h2>
-            <div className="absolute top-4 right-4 flex items-center gap-1 text-slate-400 font-mono font-bold"><Timer size={16}/> {timeLeft}</div>
+            <div className="absolute top-4 right-4 flex items-center gap-1 text-slate-400 font-mono font-bold">
+              <Timer size={16}/> {timeLeft}
+            </div>
           </div>
+
           {!isSubmitted ? (
             <div className="flex-1 space-y-3 overflow-y-auto pb-4">
               <p className="text-center text-slate-400 text-xs font-bold mb-2">떠오르는 단어 5개를 적으세요!</p>
               {myAnswers.map((ans, idx) => (
                 <div key={idx} className="flex items-center gap-3">
                   <span className="w-6 text-center font-black text-slate-300">{idx+1}</span>
-                  <input value={ans} onChange={e => handleInputChange(idx, e.target.value)} className="flex-1 bg-white border-2 border-slate-200 focus:border-blue-400 rounded-xl px-4 py-3 font-bold text-slate-700 outline-none transition-all shadow-sm" placeholder="..."/>
+                  <input 
+                    value={ans} 
+                    onChange={e => handleInputChange(idx, e.target.value)}
+                    className="flex-1 bg-white border-2 border-slate-200 focus:border-blue-400 rounded-xl px-4 py-3 font-bold text-slate-700 outline-none transition-all shadow-sm"
+                    placeholder="..."
+                  />
                 </div>
               ))}
             </div>
           ) : (
             <div className="flex-1 flex flex-col items-center justify-center space-y-4">
-              <div className="w-20 h-20 bg-green-100 rounded-full flex items-center justify-center text-green-500 animate-bounce"><CheckCircle2 size={40} /></div>
+              <div className="w-20 h-20 bg-green-100 rounded-full flex items-center justify-center text-green-500 animate-bounce">
+                <CheckCircle2 size={40} />
+              </div>
               <h3 className="text-xl font-black text-slate-700">제출 완료!</h3>
               <p className="text-slate-400 text-sm font-bold">다른 친구들을 기다리고 있어요...</p>
             </div>
           )}
-          {!isSubmitted && <button onClick={submitAnswers} className="mt-4 w-full bg-slate-800 text-white py-4 rounded-2xl font-black text-lg shadow-lg active:scale-95 transition-all">제출하기</button>}
-          {isHost && timeLeft > 0 && <button onClick={startReviewPhase} className="mt-2 text-xs text-slate-400 font-bold underline">기다리기 지루한가요? 검토 시작</button>}
+
+          {!isSubmitted && (
+            <button 
+              onClick={submitAnswers}
+              className="mt-4 w-full bg-slate-800 text-white py-4 rounded-2xl font-black text-lg shadow-lg active:scale-95 transition-all"
+            >
+              제출하기
+            </button>
+          )}
+          {isHost && timeLeft > 0 && (
+            <button onClick={startReviewPhase} className="mt-2 text-xs text-slate-400 font-bold underline">
+              기다리기 지루한가요? 검토 시작
+            </button>
+          )}
         </div>
       )}
 
-      {/* 4. [NEW] Review Phase (우기기 타임) */}
+      {/* 4. Review Phase (우기기 타임) */}
       {isJoined && roomData?.status === 'review' && (
         <div className="flex flex-col h-[calc(100vh-80px)] p-4 max-w-lg mx-auto pb-20">
           <div className="text-center mb-4">
@@ -502,4 +574,4 @@ export default function NeodoNadoGame() {
 
     </div>
   );
-        }
+    }
